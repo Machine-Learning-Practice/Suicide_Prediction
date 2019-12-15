@@ -1,0 +1,443 @@
+---
+title: "NESARC New Attempts Machine Learning Train 222 Sample"
+author: "Angel Garcia de la Garza"
+date: "03/21/2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      results = 'asis',
+                      cache = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      cache.lazy = FALSE)
+
+library(stringi)
+library(pROC)
+library(doParallel)
+library(beepr)
+library(summarytools)
+library(psych)
+library(knitr)
+library(forcats)
+library(furrr)
+library(randomForest)
+library(gbm)
+library(e1071)
+library(caret)
+library(glmnet)
+library(tidyverse)
+
+
+
+
+```
+
+## R Markdown
+
+
+```{r load data, cache = TRUE}
+
+load("/Users/angelgar/NESARC/Data/w1w2suicidedata_03_21.Rdata")
+
+```
+
+
+## SubSample
+
+```{r}
+
+set.seed(1)
+
+train.sample <- sample(w1w2suicide$IDNUM, floor(dim(w1w2suicide)[1]))
+
+w1w2suicide <- w1w2suicide %>%
+            filter(IDNUM %in% train.sample) %>%
+            dplyr::select(-IDNUM, -remove.unique.cat,
+                   -WEIGHT_,
+                   -STRATUM_, -PSU_,
+                   -CDAY_quantiles_,
+                   -CYEAR_,-CMON_,
+                   -S1Q24FT_, -S1Q24IN_, -S1Q24LB_quantiles_,
+                   -S1Q1E_) %>%
+            dplyr::select_if(is.factor) %>%
+            dplyr::mutate(suicide_222_ = ifelse(suicide_222_ == 1,
+                                                    "yes",
+                                                    "no")) %>%
+            rename(suicide_222 = suicide_222_) %>%
+            mutate(suicide_222 = as.factor(suicide_222),
+                   suicide_222 = relevel(suicide_222, "yes")) %>%
+            select(-suicide_334_)
+            
+```
+
+
+
+## Debugging Steps
+
+```{r}
+
+lev <- w1w2suicide %>%
+          dplyr::mutate_if(is.factor, droplevels) %>%
+          lapply(., levels)
+
+## count number of levels
+num.lev <- lengths(lev)
+
+rm.num.lev <- which(num.lev == 1)
+
+w1w2suicide <- w1w2suicide %>%
+                      dplyr::select(-rm.num.lev)
+
+table(w1w2suicide$suicide_222)
+
+beep()
+
+```
+
+
+```{r}
+
+rm(lev)
+rm(w1vars1)
+rm(w1w2_datatype)
+
+gc()
+
+```
+
+
+# Models 
+
+
+## Define Sampling Framework
+
+```{r}
+
+smotest <- list(name = "SMOTE with more neighbors!",
+                func = function(x, y) {
+                        checkInstall("DMwR")
+                        library(DMwR)
+                        dat <-
+                          if (is.data.frame(x)) {
+                            if (inherits(x, "tbl_df"))
+                                as.data.frame(x)
+                                else
+                                  x
+                          }
+                        else
+                          as.data.frame(x)
+                        dat$.y <- y
+                        dat <- SMOTE(.y ~ ., data = dat, perc.under = 150)
+                        list(x = dat[,!grepl(".y", colnames(dat), fixed = TRUE), drop = FALSE],
+                             y = dat$.y)
+                      },
+                first = TRUE)
+
+```
+
+## Create Train Matrix
+
+```{r}
+
+set.seed(1)
+
+x_train <- w1w2suicide[-which(names(w1w2suicide) == "suicide_222")]
+y_train <- w1w2suicide$suicide_222
+
+folds <- 10
+cvIndex <- createFolds(factor(y_train), folds, returnTrain = T)
+
+
+```
+
+
+## Caret Balanced Random Forest
+
+```{r}
+
+
+set.seed(1)
+
+rf.sample.fraction = c(222/34653, 222/34653)
+
+
+cl2 <- makePSOCKcluster(1)
+registerDoParallel(cl2)
+
+
+rangerGrid <-  expand.grid(mtry = c(2,4,8,16,32,64,128,256,512,768,1024,1280,1500,1700,1961,2100,2400,2875),
+                        splitrule = "gini",
+                        min.node.size = c(1))
+
+
+train.balanced.rf <- caret::train(x = x_train, y = y_train,
+                      method = "ranger",
+                      tuneGrid = rangerGrid,
+                      metric = "ROC",
+                      num.trees = 2000,
+                      importance = "impurity",
+                      num.threads = 5,
+                      sample.fraction = rf.sample.fraction,
+                      trControl = trainControl(method = "cv",
+                                               verboseIter = TRUE,
+                                               classProbs = TRUE,
+                                               savePredictions = TRUE,
+                                               summaryFunction = twoClassSummary,
+                                               index = cvIndex))
+
+
+beep()
+
+
+## When you are done:
+stopCluster(cl2)
+save.image("/Users/angelgar/NESARC/Output/NESARC_ML_Output_222_2019_05_26.rda")
+
+
+train.balanced.rf
+
+```
+
+
+
+## Caret Balanced Random Forest P2
+
+```{r}
+
+
+set.seed(1)
+
+rf.sample.fraction = c(222/34653, 222/34653)
+
+
+cl2 <- makePSOCKcluster(1)
+registerDoParallel(cl2)
+
+
+rangerGrid <-  expand.grid(mtry = c(2,4,8,16,32,64,128,256,512,768,1024,1280,1500,1700,1961,2100,2400,2875),
+                        splitrule = "gini",
+                        min.node.size = c(1))
+
+train.bal.rf.v2 <- caret::train(x = x_train, y = y_train,
+                      method = "ranger",
+                      tuneGrid = rangerGrid,
+                      metric = "ROC",
+                      num.trees = 500,
+                      importance = "impurity",
+                      num.threads = 5,
+                      sample.fraction = rf.sample.fraction,
+                      trControl = trainControl(method = "cv",
+                                               verboseIter = TRUE,
+                                               classProbs = TRUE,
+                                               savePredictions = TRUE,
+                                               summaryFunction = twoClassSummary,
+                                               index = cvIndex))
+
+
+beep()
+
+
+## When you are done:
+stopCluster(cl2)
+save.image("/Users/angelgar/NESARC/Output/NESARC_ML_Output_222_2019_05_26.rda")
+
+
+train.bal.rf.v2
+
+```
+
+## Load Importance Variables
+
+```{r}
+
+nesarc_222_OR_output <- read_csv("/Users/angelgar/NESARC/Output/OR_output_222_2019_03_21.csv")
+
+```
+
+## Pre Steps for Logisitc Regression
+
+```{r}
+
+formula.top1 <- as.formula(paste0("suicide_222 ~ ",
+                                   paste0(nesarc_222_OR_output$code[1],"_", collapse = " + ")))
+
+formula.top10 <- as.formula(paste0("suicide_222 ~ ",
+                                   paste0(nesarc_222_OR_output$code[1:10],"_", collapse = " + ")))
+
+formula.top50 <- paste0("suicide_222 ~ ",
+                                   paste0(nesarc_222_OR_output$code[1:50],"_", collapse = " + ")) %>%
+                 gsub(pattern = "S4AQ19A_", "S4AQ19A_quantiles_", .) %>%
+                 gsub(pattern = "S4AQ19B_", "S4AQ19B_quantiles_", .) %>%
+                 sub(pattern = "S4AQ7_", "S4AQ7_quantiles_", .) %>%
+                 sub(pattern = "S4AQ6A_", "S4AQ6A_quantiles_", .) %>%
+                 sub(pattern = "S4AQ8AR_", "S4AQ8AR_quantiles_", .) %>%
+                 as.formula()
+
+
+```
+
+
+## Logistic Regression with one variable
+
+```{r}
+
+set.seed(1)
+
+#weights_train <- rep(1,length(y_train))
+#weights_train[which(y_train == "yes")] <- round(((length(y_train)) - 222)/222)
+
+cl2 <- makePSOCKcluster(5)
+registerDoParallel(cl2)
+
+train.glmnet.1 <- caret::train(formula.top1,
+                               data = w1w2suicide,
+                               method = "glm",
+                               family = "binomial",
+                               na.action = na.omit,
+                               metric = "ROC",
+                               #weights = weights_train,
+                               trControl = trainControl(method = "cv",
+                                                         classProbs = TRUE,
+                                                         sampling = "up",
+                                                         savePredictions = TRUE,
+                                                         summaryFunction = twoClassSummary,
+                                                         index = cvIndex))
+
+## When you are done:
+stopCluster(cl2)
+
+train.glmnet.1
+
+
+```
+
+
+## Logistic Regression with top 10 Variables
+
+```{r}
+
+set.seed(1)
+
+
+cl2 <- makePSOCKcluster(5)
+registerDoParallel(cl2)
+
+train.glmnet.10 <- caret::train(formula.top10,
+                               data = w1w2suicide,
+                               method = "glm",
+                               family = "binomial",
+                               na.action = na.omit,
+                               #weights = weights_train,
+                               metric = "ROC",
+                               trControl = trainControl(method = "cv",
+                                                         classProbs = TRUE,
+                                                         sampling = "up",
+                                                         savePredictions = TRUE,
+                                                         summaryFunction = twoClassSummary,
+                                                         index = cvIndex))
+
+## When you are done:
+stopCluster(cl2)
+
+train.glmnet.10
+
+
+```
+
+
+## Logistic Regression with fifty variables
+
+```{r}
+
+set.seed(1)
+
+
+cl2 <- makePSOCKcluster(5)
+registerDoParallel(cl2)
+
+train.glmnet.50 <- caret::train(formula.top50,
+                               data = w1w2suicide,
+                               method = "glm",
+                               family = "binomial",
+                               na.action = na.omit,
+                               # weights = weights_train,
+                               metric = "ROC",
+                               trControl = trainControl(method = "cv",
+                                                         classProbs = TRUE,
+                                                         sampling = "up",
+                                                         savePredictions = TRUE,
+                                                         summaryFunction = twoClassSummary,
+                                                         index = cvIndex))
+
+## When you are done:
+stopCluster(cl2)
+#save.image("/Users/angelgar/NESARC/Output/NESARC_ML_Output_222_2019_05_26.rda")
+
+train.glmnet.50
+
+
+```
+
+
+## Hoertel Logistic Regression
+
+```{r}
+
+formula.hoertel <- as.formula(paste0("suicide_222 ~ ",
+                                     paste0(c("MAJORDEP12_","DYSDX12_",
+                                              "GENAXDX12_","PANDX12_",
+                                              "SOCPDX12_","SPHOBDX12_",
+                                              "NMANDX12_", "NHYPO12DX_",
+                                              "AVOIDPDX2_","DEPPDDX2_",
+                                              "OBCOMDX2_", "PARADX2_",
+                                              "SCHIZDX2_","HISTDX2_",
+                                              "ALCABDEP12DX_","TAB12MDX_",
+                                              "STIM12ABDEP_","PAN12ABDEP_",
+                                              "SED12ABDEP_","TRAN12ABDEP_",
+                                              "COC12ABDEP_","SOL12ABDEP_",
+                                              "HAL12ABDEP_","MAR12ABDEP_",
+                                              "HER12ABDEP_","OTHB12ABDEP_",
+                                              "GAMB12DX_","ANTISOCDX2_",
+                                              "ETHRACE2A_","MARITAL_",
+                                              "S1Q11BR_","AGE_QUANTILES_"), collapse = " + ")))
+
+
+```
+
+
+```{r}
+
+set.seed(1)
+
+
+cl2 <- makePSOCKcluster(5)
+registerDoParallel(cl2)
+
+train.glmnet.hoertel <- caret::train(formula.hoertel,
+                               data = w1w2suicide,
+                               method = "glm",
+                               family = "binomial",
+                               na.action = na.omit,
+                               # weights = weights_train,
+                               metric = "ROC",
+                               trControl = trainControl(method = "cv",
+                                                         classProbs = TRUE,
+                                                         sampling = "up",
+                                                         savePredictions = TRUE,
+                                                         summaryFunction = twoClassSummary,
+                                                         index = cvIndex))
+
+## When you are done:
+stopCluster(cl2)
+save.image("/Users/angelgar/NESARC/Output/NESARC_ML_Output_222_2019_05_26.rda")
+
+train.glmnet.hoertel
+
+
+```
+
+

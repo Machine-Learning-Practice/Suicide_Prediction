@@ -1,0 +1,1567 @@
+---
+title: "NESARC Machine Learning Report 222 Sample"
+author: "Angel Garcia de la Garza"
+date: "`12/07/2019"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+hitheme: tomorrow
+highlighter: highlight.js
+---
+
+
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      results = 'asis',
+                      cache = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      cache.lazy = FALSE,
+                      dpi= 100)
+
+library(ggridges)
+library(pROC)
+library(doParallel)
+library(beepr)
+library(psych)
+library(knitr)
+library(forcats)
+library(furrr)
+library(randomForest)
+library(gbm)
+library(e1071)
+library(caret)
+library(glmnet)
+library(tidyverse)
+
+
+
+```
+
+
+
+```{r load}
+
+# load("/Users/angelgar/NESARC/Data/w1w2suicidedata.RData")
+# load("/Users/angelgar/NESARC/Output/NESARC_ML_Output_222_2019_06_04.rda")
+
+load("~/Desktop/NESARC Paper/w1w2suicidedata.RData")
+rm(cl2)
+
+```
+
+
+```{r clean_data}
+
+w1vars1[dim(w1vars1)[1] + 1, ] <- c("INCPER3", "Personal Income in last Year")
+w1vars1[dim(w1vars1)[1] + 1, ] <- c("INCFAM3", "Family Income in last Year")
+w1vars1 <- w1vars1 %>%
+            mutate(code = paste0(code,"_"))
+
+
+w1w2suicide <- w1w2suicide %>%
+                mutate_all(as.factor) %>%
+                mutate_all(fct_explicit_na)
+
+```
+
+## Table 1: Section by Section Summary
+
+```{r table_1, cache = T, eval= F}
+
+names.questions <- names(w1w2suicide)
+
+nesarc.sections <- c("S1[F-Q]", "S2AQ", "S2BQ", "S2CQ", "S2DQ",
+                     "S3AQ", "S3B[C-Q]", "S3C[C-Q]", "S3DQ", "S3EQ",
+                     "S4AQ", "S4BQ", "S4CQ", "S5Q", "S6Q",
+                     "S7Q", "S8Q", "S9Q", "S10Q", 
+                     "S11AQ","S11BQ", "S12[Q-T]", "S13Q", "S14Q")
+
+count.section <- NA
+missing.section <- NA
+index.all <- NA
+
+
+for (i in nesarc.sections) {
+  
+  index.section <- which(str_starts(names.questions, i))
+  count.section <- c(count.section, length(index.section))
+  index.all <- c(index.all, index.section)
+  
+  subject.missing <- NA
+  
+  for (j in 1:dim(w1w2suicide)[1]) {
+    subject.missing <- c(subject.missing, 
+                         sum(w1w2suicide[j, index.section] == "(Missing)"))
+  }
+  
+  missing.section <- c(missing.section, max(subject.missing, na.rm = T))
+  
+  print(i)
+  
+}
+
+subject.missing <- NA
+for (j in 1:dim(w1w2suicide)[1]) {
+    subject.missing <- c(subject.missing, 
+                         sum(w1w2suicide[j, -index.all[-1]] == "(Missing)"))
+}
+
+nesarc.sections <- c(nesarc.sections, "other")
+count.section <- c(count.section, 2985 - length(index.all)[-1])
+missing.section <- c(missing.section, max(subject.missing, na.rm = T))
+
+output.nesarc.structure <- as.data.frame(cbind(nesarc.sections, 
+                                               count.section[-1], 
+                                               missing.section[-1])) %>%
+                            rename(Question_Num = V2,
+                                   Max_Missing = V3) %>%
+                            mutate(Question_Num = as.numeric(as.character(Question_Num)),
+                                   Max_Missing = as.numeric(as.character(Max_Missing)),
+                                   Min_Answered = Question_Num - Max_Missing)
+
+# write_csv(output.nesarc.structure, "~/Desktop/nesarc_counts.csv")
+
+```
+
+
+```{r}
+
+load("~/Desktop/NESARC Paper/NESARC_ML_Output_222_2019_06_04.rda")
+
+
+formula.top5 <- as.formula(paste0("suicide_222 ~ ",
+                                   paste0(nesarc_222_OR_output$code[1:5],"_", collapse = " + ")))
+
+
+train.glmnet.5 <- caret::train(formula.top5,
+                               data = w1w2suicide,
+                               method = "glm",
+                               family = "binomial",
+                               na.action = na.omit,
+                               metric = "ROC",
+                               #weights = weights_train,
+                               trControl = trainControl(method = "cv",
+                                                         classProbs = TRUE,
+                                                         sampling = "up",
+                                                         savePredictions = TRUE,
+                                                         summaryFunction = twoClassSummary,
+                                                         index = cvIndex))
+
+```
+
+
+# Figure 1: Comparing AUC of out of fold vs. whole model
+
+```{r}
+
+
+
+library(pROC)
+library(PRROC)
+library(MLmetrics)
+
+
+
+## Generate ROC / Predictions for Random Forest
+
+prediction.balanced.rf <- train.balanced.rf$pred %>% 
+                          arrange(rowIndex) %>%
+                          filter(mtry == 1700,
+                                 min.node.size == 1)
+prediction.balanced.rf <- prediction.balanced.rf$yes
+roc.balanced.rf <- pROC::roc(y_train,prediction.balanced.rf)
+
+
+## Generate ROC / Predictions for the final Model (NO CV)
+nocv.prediction.rf <- predict(train.rf.hoertel, type = "prob")$yes
+nocv.roc.balanced.rf <- pROC::roc(y_train,nocv.prediction.rf)
+
+## Create ggplot of ROC
+roc.plot <- ggroc(list(OutFold.RF = roc.balanced.rf,
+                       Final.RF = nocv.roc.balanced.rf)) + theme_bw() + 
+                  scale_color_manual(name = "Model", values = c("#4392F1","#7FB069"),
+                                        labels = c("Out of Fold Predictions",
+                                                   "Model Fitted to Entire Dataset"
+                                                   )) +
+                  xlab("Specificity") + ylab("Sensitivity ")
+
+pdf("figure1_roc.pdf", width = 6, height = 4)
+roc.plot
+dev.off()
+
+roc.plot
+
+## Output AUC for both of these models
+list(Balanced.RF = roc.balanced.rf$auc,
+     Balanced.RF.all.data = nocv.roc.balanced.rf$auc) %>%
+  as.matrix() %>%
+  kable(digits = 4, col.names = c("auc"))
+
+
+```
+
+
+
+# Figure 2: Performance of Model across thresholds
+
+### Precision Recall Curve
+
+Explain what the PR Curve is (PPV vs. Sensitivity)
+
+```{r}
+
+data.pred.prob <-cbind(prediction.balanced.rf) %>%
+                       as_tibble() %>%
+                       mutate(suicide = y_train) 
+
+```
+
+
+```{r}
+
+calculate.vals <- function(threshold) {
+  
+  data <- data.pred.prob %>%
+            mutate(prediction.bf = ifelse(prediction.balanced.rf > threshold,1,0),
+                   suicide = ifelse(suicide == "yes",1,0)) %>%
+            ## Create statistic at each set threshold
+            summarize(Accuracy.rf = sum(prediction.bf == suicide) / n(),
+                      Sensitivity.rf = sum((prediction.bf == suicide) & suicide == 1) / sum(suicide == 1),
+                      Specificity.rf = sum((prediction.bf == suicide) & suicide == 0) / sum(suicide == 0),
+                      PPV.rf = sum((prediction.bf == suicide) & suicide == 1) / sum(prediction.bf == 1),
+                      PPVDen.rf = sum(prediction.bf == 1),
+                      PPVSE.rf = sqrt(PPV.rf * (1-PPV.rf) / sum(prediction.bf == 1)),
+                      NPV.rf = sum((prediction.bf == suicide) & suicide == 0) / sum(prediction.bf == 0),
+                      Alarms.rf = sum(prediction.bf == 1) / n() * 100,
+                      NNE.rf = sum(prediction.bf == 1) / sum((prediction.bf == suicide) & suicide == 1)) %>%
+            mutate(threshold = threshold)
+  
+  return(data)
+
+}
+
+
+cut.off <- data.frame(cutoff = sort(c(seq(0,1, 0.00125), 0.5335)))
+
+output <- cut.off$cutoff %>%
+            map_dfr( ~ calculate.vals(threshold = .x)) %>%
+            gather(type, statistic, -threshold) %>%
+            separate(type, c("type","model"), "\\.") %>%
+            spread(type, statistic)
+
+output <- output %>%
+          filter(model == "rf")
+
+```
+
+
+
+
+
+```{r}
+
+pr.roc.plot1 <- output %>%
+                  ggplot(aes(y=PPV, x=Sensitivity, fill = model, color = model)) +
+                    geom_line() +
+                    geom_ribbon(aes(ymin = PPV - 1.96*PPVSE, ymax = PPV + 1.96*PPVSE), alpha = 0.5) +
+                    theme_bw() + 
+                    scale_color_manual(name = "Model", values = c("#4392F1"),
+                                       labels = c("Random Forest")) +
+                    scale_fill_manual(name = "Model", values = c("#4392F1"),
+                                       labels = c("Random Forest")) +
+                    xlim(0.25,1) + 
+                    scale_y_log10()
+
+pr.roc.plot2 <- output %>%
+                    filter(Sensitivity > 0.02) %>%
+                    ggplot(aes(y=PPV, x=Sensitivity, fill = model, color = model)) +
+                      geom_line() +
+                      geom_ribbon(aes(ymin = PPV - 1.96*PPVSE, ymax = PPV + 1.96*PPVSE), alpha = 0.5) +
+                      theme_bw() + 
+                    scale_color_manual(name = "Model", values = c("#4392F1"),
+                                       labels = c("Random Forest")) +
+                    scale_fill_manual(name = "Model", values = c("#4392F1"),
+                                       labels = c("Random Forest")) +
+                    scale_y_continuous(trans='log10')
+    
+pr.roc.plot3 <- output %>%
+                    ggplot(aes(y=PPV, x=Sensitivity, fill = model, color = model)) +
+                      geom_line() +
+                      geom_ribbon(aes(ymin = PPV - 1.96*PPVSE, ymax = PPV + 1.96*PPVSE), alpha = 0.5) +
+                      theme_bw() + 
+                      scale_color_manual(name = "Model", values = c("#4392F1"),
+                                         labels = c("Random Forest")) +
+                      scale_fill_manual(name = "Model", values = c("#4392F1"),
+                                         labels = c("Random Forest")) + ylim(0,1) +
+                      scale_y_continuous(trans='log10')
+
+
+PR.AUC.RF <- output %>%
+              filter(model == "rf") %>%
+              select(Sensitivity, PPV) %>%
+              unique() %>%
+              arrange(desc(Sensitivity)) %>%
+              filter(!is.nan(PPV)) %>%
+              group_by(Sensitivity) %>%
+              summarize(mean.PPV = mean(PPV, na.rm = T)) %>%
+              mutate(lag.Sens = lag(Sensitivity),
+                     delta.Sens = Sensitivity - lag.Sens) %>%
+              filter(!is.na(delta.Sens))
+
+PR.AUC.RF <- (PR.AUC.RF$mean.PPV %*% PR.AUC.RF$delta.Sens)
+
+```
+
+
+### Sensitivity and Specificity Curves
+
+```{r}
+
+sensitivity.plot <- output %>%
+                    ggplot(aes(x=threshold, y=Sensitivity, color=model)) +
+                      geom_line() +
+                      theme_bw() + xlab("Threshold") + 
+                      scale_color_manual(name = "Model", values = c("#4392F1"),
+                                         labels = c("Random Forest"))
+
+specificity.plot <- output %>%
+                    ggplot(aes(x=threshold, y=Specificity, color=model)) +
+                      geom_line() +
+                      theme_bw() + xlab("Threshold") + 
+                      scale_color_manual(name = "Model", values = c("#4392F1"),
+                                         labels = c("Random Forest"))
+
+
+```
+
+### Number Needed to Evaluate and Alerts Per 100
+
+```{r}
+
+nne.plot <- output %>%
+            ggplot(aes(x=threshold, y=NNE, color=model)) +
+              geom_line() +
+              theme_bw() + xlab("Threshold") + 
+              scale_color_manual(name = "Model", values = c("#4392F1"),
+                                 labels = c("Random Forest")) + ylab("NNE")
+
+alarms.plot <- output %>%
+                ggplot(aes(x=threshold, y=Alarms, color=model)) +
+                  geom_line() +
+                  theme_bw() + xlab("Threshold") + 
+                  scale_color_manual(name = "Model", values = c("#4392F1"),
+                                     labels = c("Random Forest")) + ylab("Alarms Per 100 Evaluations")
+
+```
+
+
+### PPV and NPV
+
+```{r, }
+
+ppv.plot <- output %>%
+              ggplot(aes(x=threshold, y=PPV, color=model)) +
+                geom_line() +
+                theme_bw() + xlab("Threshold") + 
+                scale_color_manual(name = "Model", values = c("#4392F1"),
+                                   labels = c("Random Forest"))
+
+```
+
+
+```{r, }
+
+npv.plot <- output %>%
+              ggplot(aes(x=threshold, y=NPV, color=model)) +
+                geom_line() +
+                theme_bw() + xlab("Threshold") + 
+                scale_color_manual(name = "Model", values = c("#4392F1"),
+                                   labels = c("Random Forest"))
+
+```
+
+
+### Overall Accuracy 
+
+```{r, }
+
+accuracy.plot <- output %>%
+              ggplot(aes(x=threshold, y=Accuracy, color=model)) +
+                geom_line() +
+                theme_bw() + xlab("Threshold") + 
+                scale_color_manual(name = "Model", values = c("#4392F1"), 
+                                   labels = c("Hoertel Regression",
+                                                "Random Forest"))
+
+```
+
+### Assemble the Entire Plot
+
+
+```{r}
+
+## Create Thresholds
+
+library(cutpointr)
+
+threshold.low <- cutpointr(prediction.balanced.rf, y_train, method = maximize_metric, metric = youden)$optimal_cutpoint
+threshold.med <- quantile(data.pred.prob$prediction.balanced.rf, 0.9)
+threshold.high <- min(output$threshold[which(output$PPV > 0.1)])
+
+```
+
+
+```{r}
+
+pdf("figure2_classificationmeasures.pdf", width = 4, height = 4)
+
+library(ggpubr)
+library(ggrepel)
+
+annotate.data <- output %>%
+                  filter(threshold == threshold.low |
+                         threshold == threshold.med |
+                         threshold == threshold.high) %>%
+                  mutate(group = c("Low / Medium",
+                                   "Medium / High",
+                                   "High / Very High"),
+                         sens.label = paste("Sensitivty =", round(Sensitivity,3)),
+                         spec.label = paste("Sensitivty =", round(Specificity,3)),
+                         ppv.label = paste("PPV =", round(PPV,3)),
+                         npv.label = paste("NPV =", round(NPV,3)),
+                         alarms.label = paste("Alarms Per 100 =", round(Alarms)),
+                         nne.label = paste("NNE =", round(NNE)),
+                         roc.label = paste(group, sens.label, spec.label, sep = " \n "),
+                         alarms.label = paste(group, alarms.label, sep = " \n "),
+                         ppv.label = paste(group, ppv.label, sep = " \n "),
+                         npv.label = paste(group, npv.label, sep = " \n "),
+                         sens.label = paste(group, sens.label, sep = " \n "),
+                         spec.label = paste(group, spec.label, sep = " \n "),
+                         nne.label = paste(group, nne.label, sep = " \n "))
+
+ppv.plot + 
+  geom_label_repel(
+    data = annotate.data,
+    label = annotate.data$ppv.label,
+    x = annotate.data$threshold,
+    y = log10(annotate.data$PPV),
+    segment.color = "grey50",
+    size = 2.5, 
+    box.padding = 2,
+    direction = "y",
+    show.legend = FALSE
+  ) + scale_y_continuous(trans='log10') +  guides(fill=FALSE,color = FALSE) + ylab("Positive Predictive Value")
+
+npv.plot +
+  geom_label_repel(
+    data = annotate.data,
+    label = annotate.data$npv.label,
+    x = annotate.data$threshold,
+    y = annotate.data$NPV,
+    segment.color = "grey50",
+    size = 2.5, 
+    box.padding = 2.4,
+    direction = "x",
+    show.legend = FALSE
+  ) + guides(fill=FALSE,color = FALSE) + ylab("Negative Predictive Value")
+
+alarms.plot  +
+  geom_label_repel(
+    data = annotate.data,
+    label = annotate.data$alarms.label,
+    x = annotate.data$threshold,
+    y = annotate.data$Alarms,
+    segment.color = "grey50",
+    size = 2.5, 
+    box.padding = 2.14,
+    direction = "y",
+    show.legend = FALSE
+  ) + guides(fill=FALSE,color = FALSE)
+
+
+nne.plot  +
+  geom_label_repel(
+    data = annotate.data,
+    label = annotate.data$nne.label,
+    x = annotate.data$threshold,
+    y = annotate.data$NNE,
+    segment.color = "grey50",
+    size = 2.5, 
+    box.padding = 2,
+    direction = "y",
+    show.legend = FALSE
+  ) + ylab("Number Needed to Evaluate") + guides(fill=FALSE,color = FALSE)
+
+sensitivity.plot + 
+  geom_label_repel(
+    data = annotate.data,
+    label = annotate.data$sens.label,
+    x = annotate.data$threshold,
+    y = annotate.data$Sensitivity,
+    segment.color = "grey50",
+    size = 2.5, 
+    box.padding = 2.15,
+    direction = "x",
+    show.legend = FALSE
+  ) + guides(fill=FALSE,color = FALSE)
+
+specificity.plot + 
+  geom_label_repel(
+    data = annotate.data,
+    label = annotate.data$spec.label,
+    x = annotate.data$threshold,
+    y = annotate.data$Specificity,
+    segment.color = "grey50",
+    size = 2.5, 
+    box.padding = 2.25,
+    direction = "y",
+    show.legend = FALSE
+  ) + guides(fill=FALSE,color = FALSE)
+
+
+dev.off()
+```
+
+
+
+```{r}
+
+pdf("figure2_ppv.pdf", width = 4, height = 4)
+
+ppv.plot + guides(fill=FALSE,color = FALSE) + ylab("Positive Predictive Value")
+
+dev.off()
+
+pdf("figure2_npv.pdf", width = 4, height = 4)
+
+npv.plot + guides(fill=FALSE,color = FALSE) + ylab("Negative Predictive Value")
+
+dev.off()
+
+pdf("figure2_alarms.pdf", width = 4, height = 4)
+
+alarms.plot + guides(fill=FALSE,color = FALSE)
+
+dev.off()
+
+pdf("figure2_nne.pdf", width = 4, height = 4)
+
+nne.plot + ylab("Number Needed to Evaluate") + guides(fill=FALSE,color = FALSE)
+
+dev.off()
+
+pdf("figure2_sens.pdf", width = 4, height = 4)
+
+sensitivity.plot + guides(fill=FALSE,color = FALSE)
+
+dev.off()
+
+pdf("figure2_spec.pdf", width = 4, height = 4)
+
+specificity.plot + guides(fill=FALSE,color = FALSE)
+
+dev.off()
+
+
+```
+
+
+# Table 2: Risk Group Summary
+
+```{r}
+
+very.high.cutoff <- min(output$threshold[which(output$PPV > 0.1)])
+
+
+data <- data.pred.prob %>%
+            mutate(risk.group = ifelse(prediction.balanced.rf < 0.3425, "low",
+                                ifelse(between(prediction.balanced.rf,0.3425,
+                                               quantile(data.pred.prob$prediction.balanced.rf, 0.9)),
+                                       "medium",
+                                ifelse(between(prediction.balanced.rf,quantile(data.pred.prob$prediction.balanced.rf, 0.9),
+                                               very.high.cutoff),
+                                       "high", "very high"))),
+                   prediction.bf = ifelse(risk.group == "low",
+                                          0, 1),
+                   suicide = ifelse(suicide == "yes",1,0)) %>%
+            group_by(risk.group) %>%
+            summarize(Total = n(),
+                      N.Cases = sum(suicide == 1),
+                      N.Controls = sum(suicide == 0),
+                      Prop.Cases = N.Cases / Total,
+                      Prop.Controls = N.Controls / Total,
+                      Mean.Score = mean(prediction.balanced.rf) * 100,
+                      Accuracy.rf = sum(prediction.bf == suicide) / n(),
+                      Sensitivity.rf = sum((prediction.bf == suicide) & suicide == 1) / sum(suicide == 1),
+                      Specificity.rf = sum((prediction.bf == suicide) & suicide == 0) / sum(suicide == 0),
+                      PPV.rf = sum((prediction.bf == suicide) & suicide == 1) / sum(prediction.bf == 1),
+                      PPVDen.rf = sum(prediction.bf == 1),
+                      PPVSE.rf = sqrt(PPV.rf * (1-PPV.rf) / sum(prediction.bf == 1)),
+                      NPV.rf = sum((prediction.bf == suicide) & suicide == 0) / sum(prediction.bf == 0),
+                      Alarms.rf = sum(prediction.bf == 1) / n() * 100,
+                      NNE.rf = sum(prediction.bf == 1) / sum((prediction.bf == suicide) & suicide == 1)) %>%
+            ungroup %>%
+            select(-PPVDen.rf, -PPVSE.rf) %>%
+            slice(2,3,1,4)
+
+data %>% 
+  select(risk.group:Mean.Score) %>%
+  kable(digits = 4, 
+               caption = "Summary statistics of Risk Groups",
+               col.names = c("Risk Group",
+                             "Total",
+                             "N Cases",
+                             "N Controls",
+                             "Prop Cases",
+                             "Prop Controls",
+                             "Mean Score"))
+
+percent.w2wave <- data$Total / dim(data.pred.prob)[1]
+
+```
+
+
+# Figure 3: Predictions Broken Down by Risk
+
+```{r}
+
+data.pred.prob %>%
+  mutate(risk.group = ifelse(prediction.balanced.rf < 0.3425, "low",
+                                ifelse(between(prediction.balanced.rf,0.3425,
+                                               quantile(data.pred.prob$prediction.balanced.rf, 0.9)),
+                                       "medium",
+                                ifelse(between(prediction.balanced.rf,quantile(data.pred.prob$prediction.balanced.rf, 0.9),
+                                               very.high.cutoff),
+                                       "high", "very high"))),
+         risk.group = as.factor(risk.group), 
+         risk.group = relevel(risk.group, "medium"),
+         risk.group = relevel(risk.group, "low")) %>%
+  ggplot(aes(y="dummy", x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 1) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  xlab("Score") + scale_y_discrete(expand = expand_scale(add = c(0, 2.7))) +
+  ylab("Density") +  theme_bw() + theme(axis.text.y=element_blank(),
+                                        axis.ticks.y=element_blank()) -> p1
+
+p1
+
+
+
+```
+
+This is what the predictions look like broken down by risk. 
+
+```{r}
+
+
+
+data.pred.prob %>%
+  mutate(risk.group = ifelse(prediction.balanced.rf < 0.3425, "low",
+                                ifelse(between(prediction.balanced.rf,
+                                               0.3425,
+                                               quantile(data.pred.prob$prediction.balanced.rf,
+                                                        0.9)), "medium",
+                      ifelse(between(prediction.balanced.rf,
+                                     quantile(data.pred.prob$prediction.balanced.rf,
+                                              0.9), very.high.cutoff),
+                                       "high", "very high"))),
+         risk.group = as.factor(risk.group), 
+         risk.group = relevel(risk.group, "medium"),
+         risk.group = relevel(risk.group, "low"),
+         suicide = ifelse(suicide == "yes", "Yes", "No")) %>%
+         group_by(suicide) %>%
+         summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n()) %>%
+  kable(digits = 4)
+
+data.pred.prob %>%
+  mutate(risk.group = ifelse(prediction.balanced.rf < 0.3425, "low",
+                                ifelse(between(prediction.balanced.rf,
+                                               0.3425,
+                                               quantile(data.pred.prob$prediction.balanced.rf, 0.9)),
+                                       "medium",
+                                ifelse(between(prediction.balanced.rf,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                               0.9), very.high.cutoff),
+                                       "high", "very high"))),
+         risk.group = as.factor(risk.group), 
+         risk.group = relevel(risk.group, "medium"),
+         risk.group = relevel(risk.group, "low"),
+         suicide = ifelse(suicide == "yes", "Yes", "No")) %>%
+  ggplot(aes(y=suicide, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 0.8) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  xlab("Score") + scale_y_discrete(expand = expand_scale(add = c(0, .7))) +
+  ylab("Attempted Suicide at Wave 2") + theme_bw() -> p2
+
+p2
+
+
+
+ggarrange(p1 + ylab("Overall"), p2 + ylab("Future Suicide Attempt at Wave 2"), 
+          labels = c("A", "B"), ncol = 2,
+          common.legend = TRUE, legend = "bottom")
+```
+
+# Table 3: Variable Importance for Random Forest
+
+This is what the variable importance / selection looks like for the models:
+
+```{r, fig.align = "center", fig.width = 14, fig.height = 10, dpi = 150}
+
+rf.imp <- varImp(train.balanced.rf)$importance %>%
+            as.matrix() %>%
+            as_tibble(rownames = "variable") %>%
+            arrange(desc(abs(Overall))) %>% 
+            head(50) %>%
+            rename(code = variable) %>%
+            mutate(code = gsub("_quantiles_", "_", code)) %>%
+            left_join(w1vars1, by = "code") %>%
+            select(code, description, Overall) %>%
+            mutate(In.hoertel = rep(0,50),
+                   In.hoertel = ifelse(code == "AGE_",1, In.hoertel),
+                   In.hoertel = ifelse(code == "MARITAL_", 1, In.hoertel),
+                   In.hoertel = ifelse(code == "S4AQ4A16_", 1, In.hoertel),
+                   In.hoertel = ifelse(code == "INCFAM3_", 1, In.hoertel),
+                   In.hoertel = ifelse(code == "ETHRACE2A_", 1, In.hoertel),
+                   In.hoertel = ifelse(In.hoertel == 1, "Yes","No"))
+
+
+rf.imp %>% 
+    kable()
+
+rf.imp %>%
+  write_csv("~/Desktop/variable_importance.csv")
+
+```
+
+# Figure 4: CART with Top 5 Variables
+
+```{r, cache = T, message = FALSE}
+
+set.seed(1)
+
+rf.imp <- varImp(train.balanced.rf)$importance %>%
+            as.matrix() %>%
+            as_tibble(rownames = "variable") %>%
+            arrange(desc(abs(Overall))) %>% 
+            head(50) %>%
+            rename(code = variable) %>%
+            mutate(code = gsub("_quantiles_", "_", code)) %>%
+            left_join(w1vars1, by = "code")
+
+x_train_top5 <- x_train %>%
+                    select(c(rf.imp$code[1:4], "AGE_quantiles_"))
+
+names(x_train_top5) <- rf.imp$description[1:5]
+
+train.cart.top5 <- train(x = x_train_top5 , y = relevel(y_train, "no"),
+                          method = "rpart1SE",
+                          metric = "ROC",
+                          trControl = trainControl(method = "cv",
+                                                         number = 40,
+                                                         sampling = "up",
+                                                         verboseIter = TRUE,
+                                                         classProbs = TRUE,
+                                                         savePredictions = TRUE,
+                                                         summaryFunction = twoClassSummary))
+
+train.cart.top5
+
+```
+
+```{r}
+
+rpart.plot::rpart.plot(train.cart.top5$finalModel, type = 5, fallen.leaves = F, tweak = 1,
+                       extra = 006, roundint = FALSE, xflip = T, branch = 1)
+
+```
+
+This is what these four groups look like:
+
+```{r}
+
+data.partial <- cbind(x_train, data.pred.prob)
+
+data.partial <- data.partial %>%
+                  mutate(risk.group = ifelse(prediction.balanced.rf < 0.3425, "low",
+                                      ifelse(between(prediction.balanced.rf,0.3425,
+                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)),
+                                             "medium",
+                                      ifelse(between(prediction.balanced.rf,
+                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9),
+                                             very.high.cutoff),
+                                             "high", "very high"))),
+         risk.group = as.factor(risk.group), 
+         risk.group = relevel(risk.group, "medium"),
+         risk.group = relevel(risk.group, "low"))
+
+
+
+```
+
+
+```{r}
+
+
+
+tree.data <- data.partial %>%
+              select(c(rf.imp$code[1:4], "AGE_quantiles_"), prediction.balanced.rf, suicide) %>%
+              mutate(node = ifelse(S4AQ4A18_ == 1 | S4AQ4A18_ == 9, "1",
+                            ifelse(AGE_quantiles_ == "high", "2",
+                            ifelse(S1Q213_ == 1 | 
+                                   S1Q213_ == 2 |
+                                   S1Q213_ == 3, "3", "4"))),
+                     suicide = ifelse(suicide == "yes",1,0)) %>%
+            group_by(node) %>%
+            summarize(Total = n(),
+                      N.Cases = sum(suicide == 1),
+                      N.Controls = sum(suicide == 0),
+                      Prop.Cases = N.Cases / Total,
+                      Prop.Controls = N.Controls / Total,
+                      Mean.Score = mean(prediction.balanced.rf) * 100)
+
+
+tree.data %>% 
+  select(node:Mean.Score) %>%
+  kable(digits = 4, 
+               caption = "Summary statistics of Risk Groups",
+               col.names = c("Risk Group",
+                             "Total",
+                             "N Cases",
+                             "N Controls",
+                             "Prop Cases",
+                             "Prop Controls",
+                             "Mean Score"))
+
+
+
+```
+
+
+# Figure 5: Appendix Mean Response Plots
+
+For all of these plots, I calculated the mean response of all respondents that answered the question the same way. 
+
+### Felt like wanted to die
+
+```{r}
+
+pdf("figure5.pdf", width = 4.5, height = 4.5)
+
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S4AQ4A18_, risk.group) %>% 
+  mutate(S4AQ4A18_ = ifelse(S4AQ4A18_ == 1,"Yes", 
+                     ifelse(S4AQ4A18_ == 2, "No",
+                     ifelse(S4AQ4A18_ == 9, "Missing","NA, Never or Unknown")))) %>%
+  mutate(S4AQ4A18_ = fct_relevel(S4AQ4A18_, "Yes","No", "Missing")) %>%
+  group_by(S4AQ4A18_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S4AQ4A18_) %>% 
+  mutate(S4AQ4A18_ = ifelse(S4AQ4A18_ == 1,"Yes", 
+                     ifelse(S4AQ4A18_ == 2, "No",
+                     ifelse(S4AQ4A18_ == 9, "Missing","NA, Never or Unknown")))) %>%
+  mutate(S4AQ4A18_ = fct_relevel(S4AQ4A18_, "Yes","No", "Missing"))
+
+temp.data %>%
+  ggplot(aes(y=S4AQ4A18_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 0.57) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("Felt like wanted to die") + 
+  xlab("Score") + theme_bw() -> p1
+
+p1 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 0.65)))
+
+gg
+
+
+```
+
+### Thought about commiting suicide
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S4AQ4A17_, risk.group) %>% 
+  mutate(S4AQ4A17_ = ifelse(S4AQ4A17_ == 1,"Yes", 
+                     ifelse(S4AQ4A17_ == 2, "No",
+                     ifelse(S4AQ4A17_ == 9, "Missing","NA, Never or Unknown")))) %>%
+  mutate(S4AQ4A17_ = fct_relevel(S4AQ4A17_, "Yes","No", "Missing")) %>%
+  group_by(S4AQ4A17_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S4AQ4A17_) %>% 
+  mutate(S4AQ4A17_ = ifelse(S4AQ4A17_ == 1,"Yes", 
+                     ifelse(S4AQ4A17_ == 2, "No",
+                     ifelse(S4AQ4A17_ == 9, "Missing","NA, Never or Unknown")))) %>%
+  mutate(S4AQ4A17_ = fct_relevel(S4AQ4A17_, "Yes","No", "Missing"))
+
+temp.data %>%
+  ggplot(aes(y=S4AQ4A17_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 0.57) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("Thought about commiting suicide") + 
+  xlab("Score") + theme_bw() -> p2
+
+p2 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 0.7)))
+
+```
+
+
+### Attempted Suicide
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S4AQ4A16_, risk.group) %>% 
+  mutate(S4AQ4A16_ = ifelse(S4AQ4A16_ == 1,"Yes", 
+                     ifelse(S4AQ4A16_ == 2, "No",
+                     ifelse(S4AQ4A16_ == 9, "Missing","NA, Never or Unknown")))) %>%
+  mutate(S4AQ4A16_ = fct_relevel(S4AQ4A16_, "Yes","No", "Missing")) %>%
+  group_by(S4AQ4A16_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S4AQ4A16_) %>% 
+  mutate(S4AQ4A16_ = ifelse(S4AQ4A16_ == 1,"Yes", 
+                     ifelse(S4AQ4A16_ == 2, "No",
+                     ifelse(S4AQ4A16_ == 9, "Missing","NA, Never or Unknown")))) %>%
+  mutate(S4AQ4A16_ = fct_relevel(S4AQ4A16_, "Yes","No", "Missing"))
+
+
+temp.data %>%
+  ggplot(aes(y=S4AQ4A16_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 0.57) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("Attempted Suicide") + 
+  xlab("Score") + theme_bw() -> p3
+
+p3 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 0.7)))
+
+```
+
+
+
+### Age
+
+```{r}
+
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, AGE_quantiles_, risk.group) %>% 
+  mutate(AGE_quantiles_ = fct_relevel(AGE_quantiles_, c("low", "mid", "high"))) %>%
+  group_by(AGE_quantiles_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, AGE_quantiles_) %>% 
+  mutate(AGE_quantiles_ = ifelse(AGE_quantiles_ == "low", "18-36 years old", 
+                          ifelse(AGE_quantiles_ == "mid","37-53 years old ",
+                                                         "> 53 years old")),
+    AGE_quantiles_ = fct_relevel(AGE_quantiles_, c("18-36 years old", "37-53 years old ", "> 53 years old")))
+
+temp.data %>%
+  ggplot(aes(y=AGE_quantiles_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 0.57) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("Age Quantiles") + 
+  xlab("Score") + theme_bw() -> p4
+
+p4 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 0.6)))
+
+```
+
+### DURING PAST 4 WEEKS, HOW OFTEN FELT DOWNHEARTED AND DEPRESSED
+
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q213_, risk.group) %>% 
+  mutate(S1Q213_ = ifelse(S1Q213_ == 1, "All of the time", 
+                     ifelse(S1Q213_ == 2, "Most of the time",
+                     ifelse(S1Q213_ == 3, "Some of the time",
+                     ifelse(S1Q213_ == 4, "A little of the time",
+                     ifelse(S1Q213_ == 5, "None of the time","Unknown")))))) %>%
+  mutate(S1Q213_ = fct_relevel(S1Q213_, "All of the time",
+                                 "Most of the time",
+                                 "Some of the time",
+                                 "A little of the time",
+                                 "None of the time"
+                                 )) %>%
+  group_by(S1Q213_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q213_) %>% 
+  mutate(S1Q213_ = ifelse(S1Q213_ == 1, "All of the time", 
+                     ifelse(S1Q213_ == 2, "Most of the time",
+                     ifelse(S1Q213_ == 3, "Some of the time",
+                     ifelse(S1Q213_ == 4, "A little of the time",
+                     ifelse(S1Q213_ == 5, "None of the time","Unknown")))))) %>%
+  mutate(S1Q213_ = fct_relevel(S1Q213_, "All of the time",
+                                 "Most of the time",
+                                 "Some of the time",
+                                 "A little of the time",
+                                 "None of the time"
+                                 ))
+
+temp.data %>%
+  ggplot(aes(y=S1Q213_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 1) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("During Past 4 Weeks, \n How Often Felt Downhearted And Depressed") + 
+  xlab("Score") + theme_bw() -> p5
+
+
+p5 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 1.2)))
+```
+
+
+
+### DURING PAST 4 WEEKS, HOW OFTEN DID WORK OR OTHER ACTIVITIES LESS CAREFULLY THAN USUAL AS RESULT OF EMOTIONAL PROBLEMS
+
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q191_, risk.group) %>% 
+  mutate(S1Q191_ = ifelse(S1Q191_ == 1, "All of the time", 
+                     ifelse(S1Q191_ == 2, "Most of the time",
+                     ifelse(S1Q191_ == 3, "Some of the time",
+                     ifelse(S1Q191_ == 4, "A little of the time",
+                     ifelse(S1Q191_ == 5, "None of the time","Unknown")))))) %>%
+  mutate(S1Q191_ = fct_relevel(S1Q191_, "All of the time",
+                                 "Most of the time",
+                                 "Some of the time",
+                                 "A little of the time",
+                                 "None of the time"
+                                 )) %>%
+  group_by(S1Q191_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q191_) %>% 
+  mutate(S1Q191_ = ifelse(S1Q191_ == 1, "All of the time", 
+                     ifelse(S1Q191_ == 2, "Most of the time",
+                     ifelse(S1Q191_ == 3, "Some of the time",
+                     ifelse(S1Q191_ == 4, "A little of the time",
+                     ifelse(S1Q191_ == 5, "None of the time","Unknown")))))) %>%
+  mutate(S1Q191_ = fct_relevel(S1Q191_, "All of the time",
+                                 "Most of the time",
+                                 "Some of the time",
+                                 "A little of the time",
+                                 "None of the time"
+                                 ))
+
+temp.data %>%
+  ggplot(aes(y=S1Q191_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 1) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("During Past 4 Weeks, \n How Often Did Work Or Other Activities Less Carefully Than Usual \n As Result Of Emotional Problems") + 
+  xlab("Score") + theme_bw() + theme(axis.title=element_text(size=10)) -> p6
+
+p6 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 1.2)))
+
+```
+
+
+### DURING PAST 4 WEEKS, HOW OFTEN ACCOMPLISHED LESS THAN WOULD LIKE AS RESULT OF EMOTIONAL PROBLEMS
+
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q192_, risk.group) %>% 
+  mutate(S1Q192_ = ifelse(S1Q192_ == 1, "All of the time", 
+                     ifelse(S1Q192_ == 2, "Most of the time",
+                     ifelse(S1Q192_ == 3, "Some of the time",
+                     ifelse(S1Q192_ == 4, "A little of the time",
+                     ifelse(S1Q192_ == 5, "None of the time","Unknown")))))) %>%
+  mutate(S1Q192_ = fct_relevel(S1Q192_, "All of the time",
+                                 "Most of the time",
+                                 "Some of the time",
+                                 "A little of the time",
+                                 "None of the time"
+                                 )) %>%
+  group_by(S1Q192_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q192_) %>% 
+  mutate(S1Q192_ = ifelse(S1Q192_ == 1, "All of the time", 
+                     ifelse(S1Q192_ == 2, "Most of the time",
+                     ifelse(S1Q192_ == 3, "Some of the time",
+                     ifelse(S1Q192_ == 4, "A little of the time",
+                     ifelse(S1Q192_ == 5, "None of the time","Unknown")))))) %>%
+  mutate(S1Q192_ = fct_relevel(S1Q192_, "All of the time",
+                                 "Most of the time",
+                                 "Some of the time",
+                                 "A little of the time",
+                                 "None of the time"
+                                 ))
+
+temp.data %>%
+  ggplot(aes(y=S1Q192_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 1) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("During Past 4 Weeks, \n How Often Accomplished Less Than Would Like \n As Result Of Emotional Problems") + 
+  xlab("Score") + theme_bw() + theme(axis.title=element_text(size=10)) -> p7
+
+p7 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 1.2)))
+```
+
+
+
+### Experienced Major Financial Crisis
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q2310_, risk.group) %>% 
+  mutate(S1Q2310_ = ifelse(S1Q2310_ == 1,"Yes", 
+                     ifelse(S1Q2310_ == 2, "No","Unknown"))) %>%
+  mutate(S1Q2310_ = fct_relevel(S1Q2310_, "Yes","No")) %>%
+  group_by(S1Q2310_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n())
+
+kable(temp.data, digits = 4)
+
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q2310_) %>% 
+  mutate(S1Q2310_ = ifelse(S1Q2310_ == 1,"Yes", 
+                     ifelse(S1Q2310_ == 2, "No","Unknown"))) %>%
+  mutate(S1Q2310_ = fct_relevel(S1Q2310_, "Yes","No"))
+
+
+temp.data %>%
+  ggplot(aes(y=S1Q2310_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 1) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("Experienced Major Financial Crisis") + 
+  xlab("Score") + theme_bw() + theme(axis.title=element_text(size=10)) -> p8
+
+p8 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 1.2)))
+
+dev.off()
+
+
+```
+
+### GRADE LEVEL DURING 2000-2001 SCHOOL YEAR (S1Q7D_)
+
+```{r}
+
+
+pdf("figure5_2.pdf", width = 7, height = 9)
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q7D_, risk.group) %>% 
+  group_by(S1Q7D_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n()) %>%
+  ungroup %>%
+  mutate(S1Q7D_ = case_when(S1Q7D_ == 1 ~ "High School - Any Grade Level",
+                            S1Q7D_ == 2 ~ "Enrolled in GED",
+                            S1Q7D_ == 3 ~ "1st Year Undergraduate - Never Attended College Before",
+                            S1Q7D_ == 4 ~ "1st Year Undergraduate - Attended Before",
+                            S1Q7D_ == 5 ~ "2nd Year Undergraduate",
+                            S1Q7D_ == 6 ~ "3rd Year Undergraduate",
+                            S1Q7D_ == 7 ~ "4th Year Undergraduate",
+                            S1Q7D_ == 8 ~ "5th Year Other Undergraduate",
+                            S1Q7D_ == 9 ~ "1st Year Graduate / Professional",
+                            S1Q7D_ == 10 ~ "2nd Year Graduate / Professional",
+                            S1Q7D_ == 11 ~ "3rd Year Graduate / Professional",
+                            S1Q7D_ == 12 ~ "Other",
+                            S1Q7D_ == "(Missing)" ~ "Not a student or NA"))
+
+kable(temp.data, digits = 4)
+
+
+temp.data <- data.partial  %>%
+  mutate(S1Q7D_ = case_when(S1Q7D_ == 1 ~ "High School - Any Grade Level",
+                            S1Q7D_ == 2 ~ "Enrolled in GED",
+                            S1Q7D_ == 3 ~ "1st Year Undergraduate - Never Attended College Before",
+                            S1Q7D_ == 4 ~ "1st Year Undergraduate - Attended Before",
+                            S1Q7D_ == 5 ~ "2nd Year Undergraduate",
+                            S1Q7D_ == 6 ~ "3rd Year Undergraduate",
+                            S1Q7D_ == 7 ~ "4th Year Undergraduate",
+                            S1Q7D_ == 8 ~ "5th Year Other Undergraduate",
+                            S1Q7D_ == 9 ~ "1st Year Graduate / Professional",
+                            S1Q7D_ == 10 ~ "2nd Year Graduate / Professional",
+                            S1Q7D_ == 11 ~ "3rd Year Graduate / Professional",
+                            S1Q7D_ == 12 ~ "Other",
+                            S1Q7D_ == "(Missing)" ~ "Not a student or NA"),
+         S1Q7D_ = fct_relevel(S1Q7D_, "High School - Any Grade Level",
+                                      "Enrolled in GED",
+                                      "1st Year Undergraduate - Never Attended College Before",
+                                      "1st Year Undergraduate - Attended Before",
+                                      "2nd Year Undergraduate",
+                                      "3rd Year Undergraduate",
+                                      "4th Year Undergraduate",
+                                      "5th Year Other Undergraduate",
+                                      "1st Year Graduate / Professional",
+                                      "2nd Year Graduate / Professional",
+                                      "3rd Year Graduate / Professional",
+                                      "Other"))
+
+
+temp.data %>%
+  ggplot(aes(y=S1Q7D_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 1) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("Grade level during 2000-2001 School Year") + 
+  xlab("Score") + theme_bw() + theme(axis.title=element_text(size=10)) -> p9
+
+p9 + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 1.2)))
+
+
+```
+
+
+### HIGHEST GRADE OR YEAR OF SCHOOL COMPLETED (S1Q6A)
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S1Q6A_, risk.group) %>% 
+  group_by(S1Q6A_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf),
+            prop.low = sum(risk.group == "low") / n(),
+            prop.medium = sum(risk.group == "medium") / n(),
+            prop.high = sum(risk.group == "high") / n(),
+            prop.very.high = sum(risk.group == "very high") / n(),
+            count = n()) %>%
+  ungroup %>%
+  mutate(S1Q6A_ = case_when(S1Q6A_ == 1 ~ "No Formal Schooling",
+                            S1Q6A_ == 2 ~ "Completed Grade K, 1 or 2",
+                            S1Q6A_ == 3 ~ "Completed Grade 3 or 4",
+                            S1Q6A_ == 4 ~ "Completed Grade 5 or 6",
+                            S1Q6A_ == 5 ~ "Completed Grade 7",
+                            S1Q6A_ == 6 ~ "Completed Grade 8",
+                            S1Q6A_ == 7 ~ "Some High School (Grades 9-11)",
+                            S1Q6A_ == 8 ~ "Completed High School",
+                            S1Q6A_ == 9 ~ "Completed GED",
+                            S1Q6A_ == 10 ~ "Some College (No Degree)",
+                            S1Q6A_ == 11 ~ "Completed Associate Other Technical 2-year Degree",
+                            S1Q6A_ == 12 ~ "Completed College",
+                            S1Q6A_ == 13 ~ "Some Graduate Studies",
+                            S1Q6A_ == 14 ~ "Completed Graduate or Professional Degree"))
+
+kable(temp.data, digits = 4)
+
+
+temp.data <- data.partial  %>%
+              mutate(S1Q6A_ = case_when(S1Q6A_ == 1 ~ "No Formal Schooling",
+                                        S1Q6A_ == 2 ~ "Completed Grade K, 1 or 2",
+                                        S1Q6A_ == 3 ~ "Completed Grade 3 or 4",
+                                        S1Q6A_ == 4 ~ "Completed Grade 5 or 6",
+                                        S1Q6A_ == 5 ~ "Completed Grade 7",
+                                        S1Q6A_ == 6 ~ "Completed Grade 8",
+                                        S1Q6A_ == 7 ~ "Some High School (Grades 9-11)",
+                                        S1Q6A_ == 8 ~ "Completed High School",
+                                        S1Q6A_ == 9 ~ "Completed GED",
+                                        S1Q6A_ == 10 ~ "Some College (No Degree)",
+                                        S1Q6A_ == 11 ~ "Completed Associate Other Technical 2-year Degree",
+                                        S1Q6A_ == 12 ~ "Completed College",
+                                        S1Q6A_ == 13 ~ "Some Graduate Studies",
+                                        S1Q6A_ == 14 ~ "Completed Graduate or Professional Degree"),
+                     S1Q6A_ = fct_relevel(S1Q6A_, "No Formal Schooling",
+                                                  "Completed Grade K, 1 or 2",
+                                                  "Completed Grade 3 or 4",
+                                                  "Completed Grade 5 or 6",
+                                                  "Completed Grade 7",
+                                                  "Completed Grade 8",
+                                                  "Some High School (Grades 9-11)",
+                                                  "Completed High School",
+                                                  "Completed GED",
+                                                  "Some College (No Degree)",
+                                                  "Completed Associate Other Technical 2-year Degree",
+                                                  "Completed College",
+                                                  "Some Graduate Studies")) 
+
+
+temp.data %>%
+  ggplot(aes(y=S1Q6A_, x=prediction.balanced.rf, 
+             fill = relevel(relevel(as.factor(ifelse(..x.. < 0.3425, "low",
+                                              ifelse(between(..x..,
+                                                             0.3425,
+                                                             quantile(data.pred.prob$prediction.balanced.rf, 0.9)), "medium",
+                                                     ifelse(between(..x..,quantile(data.pred.prob$prediction.balanced.rf,
+                                                                                   0.9),very.high.cutoff), "high",
+                                                            "very high")))), "medium"),"low"))) + 
+  stat_density_ridges(geom = "density_ridges_gradient", scale = 1) +
+  scale_fill_manual(values = c("#7FB069","#FFF9A5","#E6AA68","#D65D4A"),
+                                   name = "Risk Group", 
+                                   labels = c("Low",
+                                              "Medium",
+                                              "High",
+                                              "Very High")) +
+  ylab("Highest Grade Or Year Of School Completed") + 
+  xlab("Score") + theme_bw() + theme(axis.title=element_text(size=10)) -> p10
+
+p10  + theme(legend.position = "none") + scale_y_discrete(expand = expand_scale(add = c(0, 1.2)))
+dev.off()
+
+```
+
+
+
+```{r}
+
+ggarrange(p1 + theme(legend.position = "none"), 
+          p2 + theme(legend.position = "none"), nrows  = 2, ncols = 2)
+
+
+```
+
+
+### Felt like wanted to Die, Age, and During Past 4 Weeks, How Often Felt Downhearted or Depressed
+
+```{r}
+
+temp.data <- data.partial %>%
+  select(prediction.balanced.rf, S4AQ4A18_, AGE_quantiles_, S1Q213_) %>% 
+  mutate(S4AQ4A18_ = ifelse(S4AQ4A18_ == 1,"Yes", 
+                     ifelse(S4AQ4A18_ == 2, "No",
+                     ifelse(S4AQ4A18_ == 9, "Missing","NA, Never or Unknown")))) %>%
+  mutate(S4AQ4A18_ = fct_relevel(S4AQ4A18_, "Yes","No", "Missing")) %>%
+  mutate(S1Q213_ = ifelse(S1Q213_ == 1, "All of the time", 
+                     ifelse(S1Q213_ == 2, "Most of the time",
+                     ifelse(S1Q213_ == 3, "Some of the time",
+                     ifelse(S1Q213_ == 4, "A little of the time",
+                     ifelse(S1Q213_ == 5, "None of the time","Unknown")))))) %>%
+  mutate(S1Q213_ = fct_relevel(S1Q213_, "All of the time",
+                                 "Most of the time",
+                                 "Some of the time",
+                                 "A little of the time",
+                                 "None of the time"
+                                 )) %>%
+  mutate(AGE_quantiles_ = fct_relevel(AGE_quantiles_, c("low", "mid", "high"))) %>%
+  group_by(S4AQ4A18_, AGE_quantiles_, S1Q213_) %>%
+  summarize(mean.prediction = mean(prediction.balanced.rf)) %>%
+  ungroup() %>%
+  mutate(AGE_quantiles_ = Hmisc::capitalize(as.character(AGE_quantiles_)),
+         AGE_quantiles_ = fct_relevel(AGE_quantiles_, c("Low", "Mid", "High")))
+
+temp.data %>%
+ggplot(aes(x=AGE_quantiles_, y=mean.prediction, color = S4AQ4A18_, group = S4AQ4A18_)) + 
+  geom_point() + 
+  geom_line() +
+  theme_bw() + 
+  facet_grid(. ~ S1Q213_) +
+  xlab("Age") + 
+  ylab("Mean Score") + 
+  ggtitle("Felt Like Wanted to Die") + 
+  scale_color_discrete(name = "Experienced Major Financial Crisis")
+
+```
+
+

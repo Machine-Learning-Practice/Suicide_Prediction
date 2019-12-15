@@ -1,0 +1,336 @@
+---
+title: "NESARC Odds Ratio Analysis 222 Sample"
+author: "Angel Garcia de la Garza"
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output:
+  html_document: 
+    code_folding: hide
+    toc: true
+    toc_float: true
+hitheme: tomorrow
+highlighter: highlight.js
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      results = 'asis',
+                      cache = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      cache.lazy = FALSE)
+
+library(pROC)
+library(doParallel)
+library(beepr)
+#library(summarytools)
+library(psych)
+library(knitr)
+library(forcats)
+library(furrr)
+library(randomForest)
+library(gbm)
+library(e1071)
+library(caret)
+library(glmnet)
+library(tidyverse)
+
+
+
+```
+
+## R Markdown
+
+
+```{r load_data, cache = TRUE}
+
+load("/Users/angelgar/NESARC/Data/w1w2suicidedata.RData")
+load("/Users/angelgar/NESARC/Data/w1w2suicidedata_WithCases_06_04_2019.RData")
+
+```
+
+
+```{r}
+
+w1vars1[dim(w1vars1)[1] + 1, ] <- c("INCPER3", "Personal Income in last Year")
+w1vars1[dim(w1vars1)[1] + 1, ] <- c("INCFAM3", "Family Income in last Year")
+
+```
+
+
+# Remove previous attempters
+
+```{r process_data}
+
+w1w2suicide <- w1w2suicide.v3
+
+rm(w1w2suicide.v3)
+
+w1w2suicide <- w1w2suicide %>%
+                mutate(suicide_sli = suicide_new) %>%
+                select(-W2S4AQ3A16,
+                       -W2S14Q17A,
+                       -W2S14Q17B,
+                       -W2S14Q17C,
+                       -suicide_life,
+                       -suicide_age,
+                       -age_diff,
+                       -suicide_new)
+
+```
+
+
+
+# Step 1: Sort out numeric from non numeric
+
+I created a decision tree that uses two flag the numeric variables. 
+
+* All those variables that include number in either it's name or description
+* All those variables that have more than 20 unique values
+
+## Find those variables in the code book with "number"
+
+```{r clean_values}
+
+w1vars1 <- w1vars1 %>%
+            mutate(num.description = grepl("num", w1vars1$description, ignore.case = TRUE),
+                   num.description = grepl("scale", w1vars1$description, ignore.case = TRUE),
+                   num.name = grepl("num", w1vars1$code, ignore.case = TRUE),
+                   num.logical = num.description | num.name)
+```
+
+## Find variables with more than 20 unique values
+
+```{r}
+
+unique_values <- function(x) {
+  length(unique(x))
+}
+
+w1w2_datatype <- w1w2suicide %>% 
+                  map_dfc(~unique_values(.)) %>%
+                  gather(key = "code", "unique") %>%
+                  mutate(cont_twenty_logic = unique >19)
+
+```
+
+## Merge these two together to create one single rule
+
+```{r}
+
+w1w2_datatype <- w1w2_datatype %>%
+                  left_join(w1vars1, by = "code") %>%
+                  mutate(is_numeric = cont_twenty_logic | num.logical) %>%
+                  select(code, description, is_numeric) %>%
+                  unique() %>%
+                  mutate(is_numeric = ifelse(is.na(is_numeric), FALSE, is_numeric)) %>%
+                  mutate(is_numeric = ifelse(code == "S1Q1E", FALSE, is_numeric),
+                         is_numeric = ifelse(code == "WEIGHT", FALSE, is_numeric),
+                         is_numeric = ifelse(code == "STRATUM", FALSE, is_numeric),
+                         is_numeric = ifelse(code == "PSU", FALSE, is_numeric),
+                         is_numeric = ifelse(code == grepl("scale", 
+                                                           description, 
+                                                           ignore.case = T), FALSE, is_numeric)
+                         ) %>%
+                  select(code, is_numeric)
+
+```
+
+
+## Create Dummy Variables for Missing Continuous
+
+```{r}
+
+column.is.numeric <- w1w2_datatype$code[which(w1w2_datatype$is_numeric == TRUE)]
+
+
+w1w2suicide_num <- w1w2suicide %>%
+                    select(column.is.numeric)
+
+
+numeric.tocat <- function(x) {
+  
+  dummy.unknown <- ifelse(x == 99, "unknown", NA)
+  x.no.99 <- ifelse(x == 99, NA, x)
+  
+  quantiles <- ntile(x.no.99, 3) %>% as.character()
+  quantiles <- ifelse(quantiles == "1", "low", 
+          ifelse(quantiles == "2", "mid", "high"))
+  
+  quantiles <- ifelse(is.na(quantiles), dummy.unknown, quantiles)
+  
+  return(quantiles)
+
+}
+
+
+w1w2_numeric_quantiles <- w1w2suicide_num %>% 
+                        map_dfc(~numeric.tocat(.))
+
+names(w1w2_numeric_quantiles)[-1] <- paste(names(w1w2_numeric_quantiles)[-1], "quantiles", sep="_")
+w1w2_numeric_quantiles$IDNUM <- w1w2suicide_num$IDNUM
+
+```
+
+
+## Retype categorical variables
+
+```{r}
+
+mutate.columns.tofactor <- w1w2_datatype$code[which(w1w2_datatype$is_numeric == FALSE)]
+
+w1w2suicide <- w1w2suicide %>% 
+                    select(IDNUM, mutate.columns.tofactor) %>%
+                    left_join(w1w2_numeric_quantiles, by = "IDNUM") %>%
+                    mutate_all(as.factor) %>%
+                    mutate_all(fct_explicit_na)
+                    
+
+names(w1w2suicide)[-1] <- paste0(names(w1w2suicide)[-1], "_")
+
+```
+
+
+## Check for variables with unique values.
+
+```{r}
+
+remove.unique.cat <- w1w2suicide %>%
+                      future_map_dfc(~length(unique(.))) %>%
+                      t() %>%
+                      as_tibble(rownames = "variable") %>%
+                      rename(unique = V1) %>%
+                      filter(unique == 1) %>%
+                      .$variable
+
+```
+
+## Filter those out
+
+```{r}
+
+w1w2suicide <- w1w2suicide %>%
+            dplyr::select(-IDNUM, -remove.unique.cat,
+                   -STRATUM_, -PSU_,
+                   -CDAY_quantiles_,
+                   -CYEAR_,-CMON_,
+                   -S1Q24FT_, -S1Q24IN_, -S1Q24LB_quantiles_,
+                   -S1Q1E_)
+
+```
+
+
+## Section 6: Odds Ratio
+
+```{r, cache = T}
+
+plan(multiprocess)
+
+logistic.model <- function(x) {
+  
+  model <- glm(suicide ~ x, family = "binomial")
+  
+  return(anova(model, test = "Chisq")$`Pr(>Chi)`[2])
+  
+}
+
+set.seed(1)
+
+suicide <- w1w2suicide$suicide_sli_
+
+w1w2_OR <- w1w2suicide %>% 
+                  select(-suicide_sli_, - WEIGHT_) %>%
+                  future_map_dfc(~logistic.model(.)) %>%
+                  t() %>%
+                  as_tibble(rownames = "variable") %>%
+                  mutate(z.stat = qnorm(V1, lower.tail = FALSE)) %>%
+                  rename(p_value = V1) %>%
+                  mutate(variable = str_replace(variable, "_",""))
+
+```
+
+## Section 6: Weighted Odds Ratio 
+
+
+```{r, cache = T}
+
+logistic.model.weighted <- function(x) {
+  
+  model <- glm(suicide ~ x, family = "binomial",
+               weights = weight.nesarc)
+  
+  return(anova(model, test = "Chisq")$`Pr(>Chi)`[2])
+  
+}
+
+weight.nesarc <- as.numeric(as.character(w1w2suicide$WEIGHT_))
+weight.nesarc <- (weight.nesarc)/(sum(weight.nesarc))*34629
+
+w1w2_OR_weighted <- w1w2suicide %>% 
+                      select(-suicide_sli_, - WEIGHT_) %>%
+                      future_map_dfc(~logistic.model.weighted(.)) %>%
+                      t() %>%
+                      as_tibble(rownames = "variable") %>%
+                      mutate(z.stat = qnorm(V1, lower.tail = FALSE)) %>%
+                      rename(p_value = V1) %>%
+                      mutate(variable = str_replace(variable, "_",""))
+
+```
+
+
+
+## Final Table of Odds Ratio with weighted and unweighted variables.
+
+
+```{r}
+
+plan(sequential)
+
+```
+
+
+```{r}
+
+w1w2_OR_all <- w1w2_OR_weighted %>%
+                  rename(z.stat_weighted = z.stat,
+                         p_value_weighted = p_value) %>%
+                  left_join(w1w2_OR, by = "variable") %>%
+                  mutate(rank_unweighted = rank(-z.stat),
+                         rank_weighted = rank(-z.stat_weighted)) %>%
+                  rename(z.stat_unweighted = z.stat,
+                         p_value_unweighted = p_value)
+
+```
+
+## Final Table of Odds Ratio with weighted and unweighted variables.
+
+```{r}
+
+OR_Final <- w1w2_OR_all %>%
+              mutate(variable = str_replace(variable, "quantiles_","")) %>%
+              mutate(variable = str_replace(variable, "_","")) %>%
+              rename(code = variable) %>%
+              left_join(w1vars1, by = "code") %>%
+              arrange(desc(z.stat_unweighted)) %>%
+              select(code, description, z.stat_unweighted, 
+                     z.stat_weighted, rank_unweighted, rank_weighted)
+```
+
+This analysis has the `r sum(as.numeric(as.character(suicide)))` cases.
+
+
+```{r}
+
+OR_Final %>%
+  kable()
+
+```
+
+
+```{r}
+
+write_csv(OR_Final, "/Users/angelgar/NESARC/Output/NESARC_OR_Output_222_06_04_2019.csv")
+
+```
+
